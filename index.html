@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0a0a0a">
+  <title>Random Gallery</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background-color: #0a0a0a;
+      color: #f5f5f5;
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+      touch-action: pan-y; /* Mencegah browser geser halaman horizontal */
+    }
+
+    #viewer {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .slide-img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease;
+      will-change: transform, opacity;
+      pointer-events: none;
+    }
+
+    #ui-overlay {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 16px;
+      transition: opacity 0.25s ease;
+    }
+
+    #ui-overlay.hidden {
+      opacity: 0;
+    }
+
+    .top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.7);
+      background: rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(6px);
+      padding: 8px 14px;
+      border-radius: 999px;
+      align-self: center;
+    }
+
+    .bottom-bar {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      pointer-events: auto;
+    }
+
+    #caption {
+      font-size: 14px;
+      text-align: center;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 6px 14px;
+      border-radius: 8px;
+      max-width: 90%;
+    }
+
+    #caption:empty {
+      display: none;
+    }
+
+    .controls {
+      display: flex;
+      gap: 16px;
+    }
+
+    button {
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 999px;
+      font-size: 14px;
+      backdrop-filter: blur(8px);
+      cursor: pointer;
+    }
+
+    button:active {
+      background: rgba(255, 255, 255, 0.3);
+    }
+
+    #status {
+      position: absolute;
+      font-size: 14px;
+      color: #aaa;
+      text-align: center;
+      padding: 20px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="viewer">
+    <div id="status">Memuat daftar gambar...</div>
+    <img id="current-img" class="slide-img" src="" alt="" style="display: none;">
+  </div>
+
+  <div id="ui-overlay">
+    <div class="top-bar">
+      <span id="counter">0 gambar</span>
+    </div>
+    <div class="bottom-bar">
+      <div id="caption"></div>
+      <div class="controls">
+        <button id="btn-prev" type="button">← Sebelumnya</button>
+        <button id="btn-next" type="button">Acak Berikutnya →</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // GANTI DENGAN URL CSV GOOGLE SHEETS KAMU
+    const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSR9dtUCx-BGcNC26gGzEF6BlGvLrm6ws4lyOl-IqvHWTkSaUZVezSf9KWiYZ1yc3WTRKB-yUs7ONs0/pub?gid=0&single=true&output=csv';
+
+    let allItems = [];
+    let historyStack = [];   // Riwayat gambar yang sudah dilihat
+    let historyIndex = -1;   // Posisi saat ini di riwayat
+    let nextBuffer = null;   // Gambar acak berikutnya yang sudah di-preload
+
+    const viewer = document.getElementById('viewer');
+    const imgEl = document.getElementById('current-img');
+    const statusEl = document.getElementById('status');
+    const counterEl = document.getElementById('counter');
+    const captionEl = document.getElementById('caption');
+    const uiOverlay = document.getElementById('ui-overlay');
+
+    // Parser CSV sederhana (aman terhadap koma di dalam tanda kutip)
+    function parseCSV(text) {
+      const rows = [];
+      let row = [], col = '', inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i], next = text[i + 1];
+        if (c === '"' && inQuotes && next === '"') { col += '"'; i++; }
+        else if (c === '"') { inQuotes = !inQuotes; }
+        else if (c === ',' && !inQuotes) { row.push(col.trim()); col = ''; }
+        else if ((c === '\n' || (c === '\r' && next === '\n')) && !inQuotes) {
+          if (c === '\r') i++;
+          row.push(col.trim());
+          if (row.some(cell => cell !== '')) rows.push(row);
+          row = []; col = '';
+        } else { col += c; }
+      }
+      if (col || row.length) { row.push(col.trim()); rows.push(row); }
+      return rows;
+    }
+
+    // Ambil indeks acak yang tidak sama dengan gambar saat ini
+    function getRandomIndex(excludeIdx) {
+      if (allItems.length <= 1) return 0;
+      let idx;
+      do {
+        idx = Math.floor(Math.random() * allItems.length);
+      } while (idx === excludeIdx);
+      return idx;
+    }
+
+    // Preload gambar berikutnya agar transisi instan
+    function prepareNextRandom(currentIdx) {
+      const nextIdx = getRandomIndex(currentIdx);
+      nextBuffer = nextIdx;
+      const preloader = new Image();
+      preloader.src = allItems[nextIdx].url;
+    }
+
+    function renderSlide(itemIdx, direction = 'none') {
+      const item = allItems[itemIdx];
+      if (!item) return;
+
+      // Animasi geser ringan
+      if (direction === 'next') {
+        imgEl.style.transition = 'none';
+        imgEl.style.transform = 'translateX(40px)';
+        imgEl.style.opacity = '0.3';
+      } else if (direction === 'prev') {
+        imgEl.style.transition = 'none';
+        imgEl.style.transform = 'translateX(-40px)';
+        imgEl.style.opacity = '0.3';
+      }
+
+      imgEl.onload = () => {
+        statusEl.style.display = 'none';
+        imgEl.style.display = 'block';
+        requestAnimationFrame(() => {
+          imgEl.style.transition = 'transform 0.25s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease';
+          imgEl.style.transform = 'translateX(0)';
+          imgEl.style.opacity = '1';
+        });
+      };
+
+      imgEl.onerror = () => {
+        statusEl.style.display = 'block';
+        statusEl.textContent = 'Gagal memuat gambar. Geser lagi untuk lanjut.';
+        imgEl.style.display = 'none';
+      };
+
+      imgEl.src = item.url;
+      captionEl.textContent = item.caption || '';
+      counterEl.textContent = `Riwayat #${historyIndex + 1} • Total ${allItems.length}`;
+    }
+
+    function goNext() {
+      if (allItems.length === 0) return;
+
+      // Jika user sempat mundur di riwayat, maju kembali sesuai riwayat dulu
+      if (historyIndex < historyStack.length - 1) {
+        historyIndex++;
+        renderSlide(historyStack[historyIndex], 'next');
+        return;
+      }
+
+      const currentIdx = historyStack[historyIndex] ?? -1;
+      const chosenIdx = (nextBuffer !== null && nextBuffer !== currentIdx)
+        ? nextBuffer
+        : getRandomIndex(currentIdx);
+
+      historyStack.push(chosenIdx);
+      historyIndex = historyStack.length - 1;
+      renderSlide(chosenIdx, 'next');
+      prepareNextRandom(chosenIdx);
+    }
+
+    function goPrev() {
+      if (allItems.length === 0) return;
+      if (historyIndex > 0) {
+        historyIndex--;
+        renderSlide(historyStack[historyIndex], 'prev');
+      } else {
+        // Jika sudah di awal riwayat, tetap acak gambar baru saat digeser ke kanan
+        const currentIdx = historyStack[0] ?? -1;
+        const chosenIdx = getRandomIndex(currentIdx);
+        historyStack.unshift(chosenIdx);
+        renderSlide(chosenIdx, 'prev');
+      }
+    }
+
+    // Gesture Swipe Jari (Touch Events)
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchCurrentX = 0;
+    let isSwiping = false;
+
+    viewer.addEventListener('touchstart', (e) => {
+      if (e.touches.length > 1) return;
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchCurrentX = touchStartX;
+      isSwiping = true;
+      imgEl.style.transition = 'none';
+    }, { passive: true });
+
+    viewer.addEventListener('touchmove', (e) => {
+      if (!isSwiping) return;
+      touchCurrentX = e.touches[0].clientX;
+      const deltaX = touchCurrentX - touchStartX;
+      const deltaY = e.touches[0].clientY - touchStartY;
+
+      // Hanya gerakkan gambar jika geseran dominan horizontal
+      if (Math.abs(deltaX) > Math.abs(deltaY)) {
+        imgEl.style.transform = `translateX(${deltaX * 0.45}px)`;
+      }
+    }, { passive: true });
+
+    viewer.addEventListener('touchend', (e) => {
+      if (!isSwiping) return;
+      isSwiping = false;
+      const deltaX = touchCurrentX - touchStartX;
+      const threshold = 45; // Minimal geser 45px agar terhitung swipe
+
+      if (deltaX < -threshold) {
+        goNext(); // Geser jari ke kiri -> gambar acak berikutnya
+      } else if (deltaX > threshold) {
+        goPrev(); // Geser jari ke kanan -> gambar sebelumnya
+      } else {
+        // Kembalikan posisi jika geseran terlalu pendek
+        imgEl.style.transition = 'transform 0.2s ease';
+        imgEl.style.transform = 'translateX(0)';
+      }
+    });
+
+    // Ketuk layar sekali untuk sembunyikan/tampilkan UI
+    viewer.addEventListener('click', (e) => {
+      if (Math.abs(touchCurrentX - touchStartX) < 10) {
+        uiOverlay.classList.toggle('hidden');
+      }
+    });
+
+    // Navigasi tombol & keyboard
+    document.getElementById('btn-next').addEventListener('click', (e) => { e.stopPropagation(); goNext(); });
+    document.getElementById('btn-prev').addEventListener('click', (e) => { e.stopPropagation(); goPrev(); });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight') goNext();
+      if (e.key === 'ArrowLeft') goPrev();
+    });
+
+    // Ambil data dari Google Sheets CSV
+    async function init() {
+      try {
+        const res = await fetch(CSV_URL);
+        const csvText = await res.text();
+        const rows = parseCSV(csvText);
+
+        if (rows.length < 2) {
+          statusEl.textContent = 'Sheet kosong atau format CSV belum sesuai.';
+          return;
+        }
+
+        const headers = rows[0].map(h => h.toLowerCase());
+        const urlCol = headers.indexOf('url');
+        const capCol = headers.indexOf('caption');
+
+        if (urlCol === -1) {
+          statusEl.textContent = 'Kolom dengan header "url" tidak ditemukan di baris 1.';
+          return;
+        }
+
+        allItems = rows.slice(1)
+          .map(r => ({
+            url: r[urlCol] || '',
+            caption: capCol !== -1 ? (r[capCol] || '') : ''
+          }))
+          .filter(item => item.url.startsWith('http'));
+
+        if (allItems.length === 0) {
+          statusEl.textContent = 'Tidak ada link gambar valid yang ditemukan.';
+          return;
+        }
+
+        goNext();
+      } catch (err) {
+        statusEl.textContent = 'Gagal mengambil data dari Google Sheets.';
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
