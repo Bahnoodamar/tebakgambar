@@ -22,7 +22,7 @@
       color: #f5f5f5;
       font-family: system-ui, -apple-system, sans-serif;
       overflow: hidden;
-      touch-action: pan-y; /* Mencegah browser geser halaman horizontal */
+      touch-action: pan-y;
     }
 
     #viewer {
@@ -64,8 +64,8 @@
       justify-content: space-between;
       align-items: center;
       font-size: 13px;
-      color: rgba(255, 255, 255, 0.7);
-      background: rgba(0, 0, 0, 0.45);
+      color: rgba(255, 255, 255, 0.8);
+      background: rgba(0, 0, 0, 0.5);
       backdrop-filter: blur(6px);
       padding: 8px 14px;
       border-radius: 999px;
@@ -76,14 +76,14 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       pointer-events: auto;
     }
 
     #caption {
       font-size: 14px;
       text-align: center;
-      background: rgba(0, 0, 0, 0.6);
+      background: rgba(0, 0, 0, 0.65);
       padding: 6px 14px;
       border-radius: 8px;
       max-width: 90%;
@@ -95,22 +95,29 @@
 
     .controls {
       display: flex;
-      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
     }
 
     button {
       background: rgba(255, 255, 255, 0.14);
-      border: 1px solid rgba(255, 255, 255, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.22);
       color: #fff;
-      padding: 10px 20px;
+      padding: 10px 16px;
       border-radius: 999px;
-      font-size: 14px;
+      font-size: 13px;
       backdrop-filter: blur(8px);
       cursor: pointer;
     }
 
     button:active {
       background: rgba(255, 255, 255, 0.3);
+    }
+
+    button.active {
+      background: rgba(59, 130, 246, 0.75);
+      border-color: rgba(147, 197, 253, 0.9);
     }
 
     #status {
@@ -138,18 +145,22 @@
       <div class="controls">
         <button id="btn-prev" type="button">← Sebelumnya</button>
         <button id="btn-next" type="button">Acak Berikutnya →</button>
+        <button id="btn-auto" type="button">Auto: Off (3s)</button>
       </div>
     </div>
   </div>
 
   <script>
-    // GANTI DENGAN URL CSV GOOGLE SHEETS KAMU
     const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSR9dtUCx-BGcNC26gGzEF6BlGvLrm6ws4lyOl-IqvHWTkSaUZVezSf9KWiYZ1yc3WTRKB-yUs7ONs0/pub?gid=0&single=true&output=csv';
+    const AUTO_DELAY_MS = 3000;
 
     let allItems = [];
+    let shuffleDeck = [];    // Antrean indeks acak tanpa ulang dalam 1 siklus
     let historyStack = [];   // Riwayat gambar yang sudah dilihat
     let historyIndex = -1;   // Posisi saat ini di riwayat
-    let nextBuffer = null;   // Gambar acak berikutnya yang sudah di-preload
+    let nextBuffer = null;   // Preload gambar berikutnya
+    let autoTimer = null;
+    let isAutoEnabled = false;
 
     const viewer = document.getElementById('viewer');
     const imgEl = document.getElementById('current-img');
@@ -157,8 +168,8 @@
     const counterEl = document.getElementById('counter');
     const captionEl = document.getElementById('caption');
     const uiOverlay = document.getElementById('ui-overlay');
+    const btnAuto = document.getElementById('btn-auto');
 
-    // Parser CSV sederhana (aman terhadap koma di dalam tanda kutip)
     function parseCSV(text) {
       const rows = [];
       let row = [], col = '', inQuotes = false;
@@ -178,29 +189,77 @@
       return rows;
     }
 
-    // Ambil indeks acak yang tidak sama dengan gambar saat ini
-    function getRandomIndex(excludeIdx) {
-      if (allItems.length <= 1) return 0;
-      let idx;
-      do {
-        idx = Math.floor(Math.random() * allItems.length);
-      } while (idx === excludeIdx);
+    // Fisher-Yates shuffle untuk membuat siklus tanpa pengulangan
+    function buildShuffledDeck(excludeIdx = -1) {
+      const indices = [];
+      for (let i = 0; i < allItems.length; i++) {
+        indices.push(i);
+      }
+      for (let i = indices.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [indices[i], indices[j]] = [indices[j], indices[i]];
+      }
+      if (indices.length > 1 && indices[indices.length - 1] === excludeIdx) {
+        [indices[indices.length - 1], indices[0]] = [indices[0], indices[indices.length - 1]];
+      }
+      shuffleDeck = indices;
+    }
+
+    function drawFromDeck(excludeIdx = -1) {
+      if (allItems.length === 0) return -1;
+      if (shuffleDeck.length === 0) {
+        buildShuffledDeck(excludeIdx);
+      }
+      let idx = shuffleDeck.pop();
+      if (idx === excludeIdx && shuffleDeck.length > 0) {
+        const alt = shuffleDeck.pop();
+        shuffleDeck.unshift(idx);
+        idx = alt;
+      }
       return idx;
     }
 
-    // Preload gambar berikutnya agar transisi instan
     function prepareNextRandom(currentIdx) {
-      const nextIdx = getRandomIndex(currentIdx);
+      if (allItems.length <= 1) {
+        nextBuffer = 0;
+        return;
+      }
+      const nextIdx = drawFromDeck(currentIdx);
       nextBuffer = nextIdx;
       const preloader = new Image();
       preloader.src = allItems[nextIdx].url;
+    }
+
+    function clearAutoTimer() {
+      if (autoTimer !== null) {
+        clearTimeout(autoTimer);
+        autoTimer = null;
+      }
+    }
+
+    function scheduleAutoNext() {
+      clearAutoTimer();
+      if (!isAutoEnabled || allItems.length === 0) return;
+      autoTimer = setTimeout(() => {
+        goNext();
+      }, AUTO_DELAY_MS);
+    }
+
+    function toggleAutoMode() {
+      isAutoEnabled = !isAutoEnabled;
+      btnAuto.classList.toggle('active', isAutoEnabled);
+      btnAuto.textContent = isAutoEnabled ? 'Auto: On (3s)' : 'Auto: Off (3s)';
+      if (isAutoEnabled) {
+        scheduleAutoNext();
+      } else {
+        clearAutoTimer();
+      }
     }
 
     function renderSlide(itemIdx, direction = 'none') {
       const item = allItems[itemIdx];
       if (!item) return;
 
-      // Animasi geser ringan
       if (direction === 'next') {
         imgEl.style.transition = 'none';
         imgEl.style.transform = 'translateX(40px)';
@@ -211,6 +270,10 @@
         imgEl.style.opacity = '0.3';
       }
 
+      const startTimerAfterLoad = () => {
+        scheduleAutoNext();
+      };
+
       imgEl.onload = () => {
         statusEl.style.display = 'none';
         imgEl.style.display = 'block';
@@ -219,23 +282,27 @@
           imgEl.style.transform = 'translateX(0)';
           imgEl.style.opacity = '1';
         });
+        startTimerAfterLoad();
       };
 
       imgEl.onerror = () => {
         statusEl.style.display = 'block';
-        statusEl.textContent = 'Gagal memuat gambar. Geser lagi untuk lanjut.';
+        statusEl.textContent = 'Gagal memuat gambar. Lanjut otomatis/geser...';
         imgEl.style.display = 'none';
+        startTimerAfterLoad();
       };
 
       imgEl.src = item.url;
       captionEl.textContent = item.caption || '';
-      counterEl.textContent = `Riwayat #${historyIndex + 1} • Total ${allItems.length}`;
+
+      const remainingInCycle = shuffleDeck.length + (nextBuffer !== null ? 1 : 0);
+      counterEl.textContent = `Riwayat #${historyIndex + 1} • Sisa siklus: ${remainingInCycle}/${allItems.length}`;
     }
 
     function goNext() {
       if (allItems.length === 0) return;
+      clearAutoTimer();
 
-      // Jika user sempat mundur di riwayat, maju kembali sesuai riwayat dulu
       if (historyIndex < historyStack.length - 1) {
         historyIndex++;
         renderSlide(historyStack[historyIndex], 'next');
@@ -245,8 +312,9 @@
       const currentIdx = historyStack[historyIndex] ?? -1;
       const chosenIdx = (nextBuffer !== null && nextBuffer !== currentIdx)
         ? nextBuffer
-        : getRandomIndex(currentIdx);
+        : drawFromDeck(currentIdx);
 
+      nextBuffer = null;
       historyStack.push(chosenIdx);
       historyIndex = historyStack.length - 1;
       renderSlide(chosenIdx, 'next');
@@ -255,19 +323,19 @@
 
     function goPrev() {
       if (allItems.length === 0) return;
+      clearAutoTimer();
       if (historyIndex > 0) {
         historyIndex--;
         renderSlide(historyStack[historyIndex], 'prev');
       } else {
-        // Jika sudah di awal riwayat, tetap acak gambar baru saat digeser ke kanan
         const currentIdx = historyStack[0] ?? -1;
-        const chosenIdx = getRandomIndex(currentIdx);
+        const chosenIdx = drawFromDeck(currentIdx);
         historyStack.unshift(chosenIdx);
         renderSlide(chosenIdx, 'prev');
       }
     }
 
-    // Gesture Swipe Jari (Touch Events)
+    // Gesture Swipe Jari
     let touchStartX = 0;
     let touchStartY = 0;
     let touchCurrentX = 0;
@@ -288,45 +356,51 @@
       const deltaX = touchCurrentX - touchStartX;
       const deltaY = e.touches[0].clientY - touchStartY;
 
-      // Hanya gerakkan gambar jika geseran dominan horizontal
       if (Math.abs(deltaX) > Math.abs(deltaY)) {
         imgEl.style.transform = `translateX(${deltaX * 0.45}px)`;
       }
     }, { passive: true });
 
-    viewer.addEventListener('touchend', (e) => {
+    viewer.addEventListener('touchend', () => {
       if (!isSwiping) return;
       isSwiping = false;
       const deltaX = touchCurrentX - touchStartX;
-      const threshold = 45; // Minimal geser 45px agar terhitung swipe
+      const threshold = 45;
 
       if (deltaX < -threshold) {
-        goNext(); // Geser jari ke kiri -> gambar acak berikutnya
+        goNext();
       } else if (deltaX > threshold) {
-        goPrev(); // Geser jari ke kanan -> gambar sebelumnya
+        goPrev();
       } else {
-        // Kembalikan posisi jika geseran terlalu pendek
         imgEl.style.transition = 'transform 0.2s ease';
         imgEl.style.transform = 'translateX(0)';
       }
     });
 
-    // Ketuk layar sekali untuk sembunyikan/tampilkan UI
-    viewer.addEventListener('click', (e) => {
+    viewer.addEventListener('click', () => {
       if (Math.abs(touchCurrentX - touchStartX) < 10) {
         uiOverlay.classList.toggle('hidden');
       }
     });
 
-    // Navigasi tombol & keyboard
     document.getElementById('btn-next').addEventListener('click', (e) => { e.stopPropagation(); goNext(); });
     document.getElementById('btn-prev').addEventListener('click', (e) => { e.stopPropagation(); goPrev(); });
+    btnAuto.addEventListener('click', (e) => { e.stopPropagation(); toggleAutoMode(); });
+
     window.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowRight') goNext();
       if (e.key === 'ArrowLeft') goPrev();
+      if (e.key.toLowerCase() === 'a') toggleAutoMode();
     });
 
-    // Ambil data dari Google Sheets CSV
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        clearAutoTimer();
+      } else if (isAutoEnabled) {
+        scheduleAutoNext();
+      }
+    });
+
     async function init() {
       try {
         const res = await fetch(CSV_URL);
@@ -359,6 +433,7 @@
           return;
         }
 
+        buildShuffledDeck(-1);
         goNext();
       } catch (err) {
         statusEl.textContent = 'Gagal mengambil data dari Google Sheets.';
