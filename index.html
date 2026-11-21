@@ -172,9 +172,11 @@
     #status {
       position: absolute;
       font-size: 14px;
-      color: #aaa;
+      color: #ccc;
       text-align: center;
       padding: 20px;
+      max-width: 85%;
+      line-height: 1.5;
     }
   </style>
 </head>
@@ -203,6 +205,7 @@
         <button id="btn-auto" type="button">Auto: Off (5s)</button>
         <button id="btn-zoom-in" type="button">Zoom +</button>
         <button id="btn-reset-zoom" type="button" style="display: none;">Reset</button>
+        <button id="btn-reload" type="button">Reload</button>
       </div>
     </div>
   </div>
@@ -238,8 +241,14 @@
     const btnAuto = document.getElementById('btn-auto');
     const btnZoomIn = document.getElementById('btn-zoom-in');
     const btnResetZoom = document.getElementById('btn-reset-zoom');
+    const btnReload = document.getElementById('btn-reload');
     const progressTrack = document.getElementById('progress-track');
     const progressFill = document.getElementById('progress-fill');
+
+    function setStatus(msg) {
+      statusEl.style.display = 'block';
+      statusEl.textContent = msg;
+    }
 
     function parseCSV(text) {
       const rows = [];
@@ -443,8 +452,7 @@
       };
 
       imgEl.onerror = () => {
-        statusEl.style.display = 'block';
-        statusEl.textContent = 'Gagal memuat gambar. Lanjut otomatis/geser...';
+        setStatus(`Gagal memuat gambar:\n${item.url}`);
         imgEl.style.display = 'none';
         startAutoProgress();
       };
@@ -496,7 +504,7 @@
     }
 
     // Gesture Pinch-to-Zoom, Pan, Swipe & Double-Tap
-    let touchMode = 'none'; // 'none' | 'swipe' | 'pan' | 'pinch'
+    let touchMode = 'none';
     let startX = 0, startY = 0, lastX = 0, lastY = 0;
     let initialPinchDist = 0, initialPinchScale = 1;
     let lastTapTime = 0;
@@ -625,6 +633,7 @@
     btnAuto.addEventListener('click', (e) => { e.stopPropagation(); toggleAutoMode(); });
     btnZoomIn.addEventListener('click', (e) => { e.stopPropagation(); zoomStep(); });
     btnResetZoom.addEventListener('click', (e) => { e.stopPropagation(); resetZoom(true); });
+    btnReload.addEventListener('click', (e) => { e.stopPropagation(); init(true); });
 
     window.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowRight') goNext();
@@ -641,39 +650,62 @@
       }
     });
 
-    async function init() {
+    async function init(forceFresh = false) {
+      stopAutoProgress(false);
+      setStatus('Memuat daftar gambar...');
+
       try {
-        const res = await fetch(CSV_URL);
+        const sep = CSV_URL.includes('?') ? '&' : '?';
+        const targetUrl = forceFresh ? `${CSV_URL}${sep}_t=${Date.now()}` : CSV_URL;
+        const res = await fetch(targetUrl, { cache: forceFresh ? 'no-store' : 'default' });
+
+        if (!res.ok) {
+          setStatus(`Gagal memuat sheet (HTTP ${res.status}).`);
+          return;
+        }
+
         const csvText = await res.text();
         const rows = parseCSV(csvText);
 
         if (rows.length < 2) {
-          statusEl.textContent = 'Sheet kosong atau format CSV belum sesuai.';
+          setStatus('Sheet kosong atau format CSV belum sesuai.');
           return;
         }
 
-        const headers = rows[0].map(h => h.toLowerCase());
+        const headers = rows[0].map(h => h.replace(/^\uFEFF/, '').trim().toLowerCase());
         const urlCol = headers.indexOf('url');
         const capCol = headers.indexOf('caption');
 
         if (urlCol === -1) {
-          statusEl.textContent = 'Kolom dengan header "url" tidak ditemukan di baris 1.';
+          setStatus(`Header "url" tidak ditemukan di baris 1. Terbaca: ${headers.join(', ')}`);
           return;
         }
 
         allItems = rows.slice(1)
           .map(r => ({
-            url: r[urlCol] || '',
-            caption: capCol !== -1 ? (r[capCol] || '') : ''
+            url: (r[urlCol] || '').trim(),
+            caption: capCol !== -1 ? (r[capCol] || '').trim() : ''
           }))
-          .filter(item => item.url.startsWith('http'));
+          .filter(item => /^(https?:)?\/\//i.test(item.url));
 
         if (allItems.length === 0) {
-          statusEl.textContent = 'Tidak ada link gambar valid yang ditemukan.';
+          setStatus('Tidak ada link gambar valid (http/https) ditemukan di kolom "url".');
           return;
         }
+
+        shuffleDeck = [];
+        historyStack = [];
+        historyIndex = -1;
+        nextBuffer = null;
 
         buildShuffledDeck(-1);
         goNext();
       } catch (err) {
-        statusEl.textContent = 'Gagal mengambil data dari Google Sheets.';
+        setStatus(`Gagal mengambil data dari Google Sheets: ${err && err.message ? err.message : 'Error jaringan'}`);
+      }
+    }
+
+    init(false);
+  </script>
+</body>
+</html>
