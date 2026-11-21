@@ -22,10 +22,9 @@
       color: #f5f5f5;
       font-family: system-ui, -apple-system, sans-serif;
       overflow: hidden;
-      touch-action: pan-y;
+      touch-action: none; /* Dikontrol penuh oleh touch event JS */
     }
 
-    /* Progress bar di bagian paling atas layar */
     #progress-track {
       position: fixed;
       top: 0;
@@ -64,7 +63,7 @@
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
-      transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease;
+      transform-origin: center center;
       will-change: transform, opacity;
       pointer-events: none;
     }
@@ -97,17 +96,24 @@
       align-self: center;
     }
 
-    #countdown-badge {
+    #countdown-badge, #zoom-badge {
       display: none;
       font-variant-numeric: tabular-nums;
       font-weight: 600;
-      color: #93c5fd;
       padding-left: 10px;
       border-left: 1px solid rgba(255, 255, 255, 0.2);
     }
 
-    #countdown-badge.visible {
+    #countdown-badge.visible, #zoom-badge.visible {
       display: inline-block;
+    }
+
+    #countdown-badge {
+      color: #93c5fd;
+    }
+
+    #zoom-badge {
+      color: #fde047;
     }
 
     .bottom-bar {
@@ -182,6 +188,7 @@
   <div id="ui-overlay">
     <div class="top-bar">
       <span id="counter">0 gambar</span>
+      <span id="zoom-badge">1.0x</span>
       <span id="countdown-badge">5.0s</span>
     </div>
     <div class="bottom-bar">
@@ -190,6 +197,7 @@
         <button id="btn-prev" type="button">← Sebelumnya</button>
         <button id="btn-next" type="button">Acak Berikutnya →</button>
         <button id="btn-auto" type="button">Auto: Off (5s)</button>
+        <button id="btn-reset-zoom" type="button" style="display: none;">Reset Zoom</button>
       </div>
     </div>
   </div>
@@ -197,25 +205,34 @@
   <script>
     const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSR9dtUCx-BGcNC26gGzEF6BlGvLrm6ws4lyOl-IqvHWTkSaUZVezSf9KWiYZ1yc3WTRKB-yUs7ONs0/pub?gid=0&single=true&output=csv';
     const AUTO_DELAY_MS = 5000;
+    const MIN_SCALE = 1;
+    const MAX_SCALE = 4;
 
     let allItems = [];
-    let shuffleDeck = [];    // Antrean indeks acak tanpa ulang dalam 1 siklus
-    let historyStack = [];   // Riwayat gambar yang sudah dilihat
-    let historyIndex = -1;   // Posisi saat ini di riwayat
-    let nextBuffer = null;   // Preload gambar berikutnya
+    let shuffleDeck = [];
+    let historyStack = [];
+    let historyIndex = -1;
+    let nextBuffer = null;
 
     let isAutoEnabled = false;
     let autoRafId = null;
     let autoStartTime = 0;
 
+    // Status Transform Zoom & Pan
+    let scale = 1;
+    let translateX = 0;
+    let translateY = 0;
+
     const viewer = document.getElementById('viewer');
     const imgEl = document.getElementById('current-img');
     const statusEl = document.getElementById('status');
     const counterEl = document.getElementById('counter');
+    const zoomBadge = document.getElementById('zoom-badge');
     const countdownBadge = document.getElementById('countdown-badge');
     const captionEl = document.getElementById('caption');
     const uiOverlay = document.getElementById('ui-overlay');
     const btnAuto = document.getElementById('btn-auto');
+    const btnResetZoom = document.getElementById('btn-reset-zoom');
     const progressTrack = document.getElementById('progress-track');
     const progressFill = document.getElementById('progress-fill');
 
@@ -238,7 +255,47 @@
       return rows;
     }
 
-    // Fisher-Yates shuffle untuk siklus tanpa pengulangan
+    function clampPan() {
+      if (scale <= 1) {
+        translateX = 0;
+        translateY = 0;
+        return;
+      }
+      const maxPanX = ((scale - 1) * viewer.clientWidth) / 2;
+      const maxPanY = ((scale - 1) * viewer.clientHeight) / 2;
+      translateX = Math.max(-maxPanX, Math.min(maxPanX, translateX));
+      translateY = Math.max(-maxPanY, Math.min(maxPanY, translateY));
+    }
+
+    function applyTransform(withTransition = false) {
+      clampPan();
+      imgEl.style.transition = withTransition
+        ? 'transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease'
+        : 'none';
+      imgEl.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+
+      const isZoomed = scale > 1.02;
+      zoomBadge.textContent = `${scale.toFixed(1)}x`;
+      zoomBadge.classList.toggle('visible', isZoomed);
+      btnResetZoom.style.display = isZoomed ? 'inline-block' : 'none';
+
+      // Jeda timer otomatis selama gambar sedang di-zoom
+      if (isAutoEnabled) {
+        if (isZoomed) {
+          stopAutoProgress(false);
+        } else if (autoRafId === null) {
+          startAutoProgress();
+        }
+      }
+    }
+
+    function resetZoom(withTransition = true) {
+      scale = 1;
+      translateX = 0;
+      translateY = 0;
+      applyTransform(withTransition);
+    }
+
     function buildShuffledDeck(excludeIdx = -1) {
       const indices = [];
       for (let i = 0; i < allItems.length; i++) {
@@ -284,8 +341,8 @@
         cancelAnimationFrame(autoRafId);
         autoRafId = null;
       }
-      progressFill.style.width = '0%';
       if (hideBar) {
+        progressFill.style.width = '0%';
         progressTrack.classList.remove('visible');
         countdownBadge.classList.remove('visible');
       }
@@ -293,9 +350,11 @@
 
     function startAutoProgress() {
       stopAutoProgress(false);
-      if (!isAutoEnabled || allItems.length === 0) {
-        progressTrack.classList.remove('visible');
-        countdownBadge.classList.remove('visible');
+      if (!isAutoEnabled || allItems.length === 0 || scale > 1.02) {
+        if (!isAutoEnabled) {
+          progressTrack.classList.remove('visible');
+          countdownBadge.classList.remove('visible');
+        }
         return;
       }
 
@@ -304,7 +363,10 @@
       autoStartTime = performance.now();
 
       function tick(now) {
-        if (!isAutoEnabled) return;
+        if (!isAutoEnabled || scale > 1.02) {
+          autoRafId = null;
+          return;
+        }
         const elapsed = now - autoStartTime;
         const ratio = Math.min(elapsed / AUTO_DELAY_MS, 1);
         const remainingSec = Math.max((AUTO_DELAY_MS - elapsed) / 1000, 0).toFixed(1);
@@ -339,13 +401,19 @@
       const item = allItems[itemIdx];
       if (!item) return;
 
+      scale = 1;
+      translateX = 0;
+      translateY = 0;
+      zoomBadge.classList.remove('visible');
+      btnResetZoom.style.display = 'none';
+
       if (direction === 'next') {
         imgEl.style.transition = 'none';
-        imgEl.style.transform = 'translateX(40px)';
+        imgEl.style.transform = 'translateX(40px) scale(1)';
         imgEl.style.opacity = '0.3';
       } else if (direction === 'prev') {
         imgEl.style.transition = 'none';
-        imgEl.style.transform = 'translateX(-40px)';
+        imgEl.style.transform = 'translateX(-40px) scale(1)';
         imgEl.style.opacity = '0.3';
       }
 
@@ -354,7 +422,7 @@
         imgEl.style.display = 'block';
         requestAnimationFrame(() => {
           imgEl.style.transition = 'transform 0.25s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease';
-          imgEl.style.transform = 'translateX(0)';
+          imgEl.style.transform = 'translate(0px, 0px) scale(1)';
           imgEl.style.opacity = '1';
         });
         startAutoProgress();
@@ -377,6 +445,7 @@
     function goNext() {
       if (allItems.length === 0) return;
       stopAutoProgress(false);
+      progressFill.style.width = '0%';
 
       if (historyIndex < historyStack.length - 1) {
         historyIndex++;
@@ -399,6 +468,7 @@
     function goPrev() {
       if (allItems.length === 0) return;
       stopAutoProgress(false);
+      progressFill.style.width = '0%';
 
       if (historyIndex > 0) {
         historyIndex--;
@@ -411,68 +481,137 @@
       }
     }
 
-    // Gesture Swipe Jari
-    let touchStartX = 0;
-    let touchStartY = 0;
-    let touchCurrentX = 0;
-    let isSwiping = false;
+    // Gesture Pinch-to-Zoom, Pan, Swipe & Double-Tap
+    let touchMode = 'none'; // 'none' | 'swipe' | 'pan' | 'pinch'
+    let startX = 0, startY = 0, lastX = 0, lastY = 0;
+    let initialPinchDist = 0, initialPinchScale = 1;
+    let lastTapTime = 0;
+    let movedDistance = 0;
+
+    function getTouchDistance(t1, t2) {
+      const dx = t1.clientX - t2.clientX;
+      const dy = t1.clientY - t2.clientY;
+      return Math.hypot(dx, dy);
+    }
 
     viewer.addEventListener('touchstart', (e) => {
-      if (e.touches.length > 1) return;
-      touchStartX = e.touches[0].clientX;
-      touchStartY = e.touches[0].clientY;
-      touchCurrentX = touchStartX;
-      isSwiping = true;
-      imgEl.style.transition = 'none';
+      if (e.touches.length === 2) {
+        touchMode = 'pinch';
+        initialPinchDist = getTouchDistance(e.touches[0], e.touches[1]);
+        initialPinchScale = scale;
+        movedDistance = 20;
+      } else if (e.touches.length === 1) {
+        const t = e.touches[0];
+        startX = lastX = t.clientX;
+        startY = lastY = t.clientY;
+        movedDistance = 0;
+        touchMode = scale > 1.02 ? 'pan' : 'swipe';
+      }
     }, { passive: true });
 
     viewer.addEventListener('touchmove', (e) => {
-      if (!isSwiping) return;
-      touchCurrentX = e.touches[0].clientX;
-      const deltaX = touchCurrentX - touchStartX;
-      const deltaY = e.touches[0].clientY - touchStartY;
+      if (touchMode === 'pinch' && e.touches.length === 2) {
+        const dist = getTouchDistance(e.touches[0], e.touches[1]);
+        if (initialPinchDist > 0) {
+          const nextScale = initialPinchScale * (dist / initialPinchDist);
+          scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
+          applyTransform(false);
+        }
+      } else if (e.touches.length === 1) {
+        const t = e.touches[0];
+        const dx = t.clientX - lastX;
+        const dy = t.clientY - lastY;
+        movedDistance += Math.hypot(dx, dy);
+        lastX = t.clientX;
+        lastY = t.clientY;
 
-      if (Math.abs(deltaX) > Math.abs(deltaY)) {
-        imgEl.style.transform = `translateX(${deltaX * 0.45}px)`;
+        if (touchMode === 'pan' && scale > 1.02) {
+          translateX += dx;
+          translateY += dy;
+          applyTransform(false);
+        } else if (touchMode === 'swipe') {
+          const totalDx = t.clientX - startX;
+          const totalDy = t.clientY - startY;
+          if (Math.abs(totalDx) > Math.abs(totalDy)) {
+            imgEl.style.transition = 'none';
+            imgEl.style.transform = `translateX(${totalDx * 0.45}px) scale(1)`;
+          }
+        }
       }
     }, { passive: true });
 
-    viewer.addEventListener('touchend', () => {
-      if (!isSwiping) return;
-      isSwiping = false;
-      const deltaX = touchCurrentX - touchStartX;
-      const threshold = 45;
-
-      if (deltaX < -threshold) {
-        goNext();
-      } else if (deltaX > threshold) {
-        goPrev();
-      } else {
-        imgEl.style.transition = 'transform 0.2s ease';
-        imgEl.style.transform = 'translateX(0)';
+    viewer.addEventListener('touchend', (e) => {
+      if (touchMode === 'pinch') {
+        if (scale <= 1.05) {
+          resetZoom(true);
+        }
+        if (e.touches.length === 1) {
+          lastX = e.touches[0].clientX;
+          lastY = e.touches[0].clientY;
+          touchMode = scale > 1.02 ? 'pan' : 'swipe';
+        } else {
+          touchMode = 'none';
+        }
+        return;
       }
-    });
 
-    viewer.addEventListener('click', () => {
-      if (Math.abs(touchCurrentX - touchStartX) < 10) {
-        uiOverlay.classList.toggle('hidden');
+      if (touchMode === 'swipe' && e.touches.length === 0) {
+        const deltaX = lastX - startX;
+        const threshold = 45;
+        if (deltaX < -threshold) {
+          goNext();
+        } else if (deltaX > threshold) {
+          goPrev();
+        } else {
+          imgEl.style.transition = 'transform 0.2s ease';
+          imgEl.style.transform = 'translate(0px, 0px) scale(1)';
+        }
+      }
+
+      // Deteksi tap tunggal & double-tap
+      if (e.touches.length === 0 && movedDistance < 12) {
+        const now = Date.now();
+        if (now - lastTapTime < 280) {
+          // Double tap: toggle zoom 2.2x <-> 1x
+          if (scale > 1.05) {
+            resetZoom(true);
+          } else {
+            scale = 2.2;
+            applyTransform(true);
+          }
+          lastTapTime = 0;
+        } else {
+          lastTapTime = now;
+          setTimeout(() => {
+            if (lastTapTime !== 0 && Date.now() - lastTapTime >= 270) {
+              uiOverlay.classList.toggle('hidden');
+              lastTapTime = 0;
+            }
+          }, 280);
+        }
+      }
+
+      if (e.touches.length === 0) {
+        touchMode = 'none';
       }
     });
 
     document.getElementById('btn-next').addEventListener('click', (e) => { e.stopPropagation(); goNext(); });
     document.getElementById('btn-prev').addEventListener('click', (e) => { e.stopPropagation(); goPrev(); });
     btnAuto.addEventListener('click', (e) => { e.stopPropagation(); toggleAutoMode(); });
+    btnResetZoom.addEventListener('click', (e) => { e.stopPropagation(); resetZoom(true); });
 
     window.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowRight') goNext();
       if (e.key === 'ArrowLeft') goPrev();
       if (e.key.toLowerCase() === 'a') toggleAutoMode();
+      if (e.key === '0') resetZoom(true);
     });
 
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         stopAutoProgress(false);
-      } else if (isAutoEnabled) {
+      } else if (isAutoEnabled && scale <= 1.02) {
         startAutoProgress();
       }
     });
