@@ -13,6 +13,7 @@
       padding: 0;
       -webkit-tap-highlight-color: transparent;
       user-select: none;
+      -webkit-user-select: none;
     }
 
     html, body {
@@ -22,7 +23,7 @@
       color: #f5f5f5;
       font-family: system-ui, -apple-system, sans-serif;
       overflow: hidden;
-      touch-action: none; /* Dikontrol penuh oleh touch event JS */
+      touch-action: none;
     }
 
     #progress-track {
@@ -57,6 +58,7 @@
       align-items: center;
       justify-content: center;
       overflow: hidden;
+      touch-action: none;
     }
 
     .slide-img {
@@ -66,6 +68,7 @@
       transform-origin: center center;
       will-change: transform, opacity;
       pointer-events: none;
+      -webkit-user-drag: none;
     }
 
     #ui-overlay {
@@ -77,6 +80,7 @@
       justify-content: space-between;
       padding: 18px 16px 16px;
       transition: opacity 0.25s ease;
+      z-index: 20;
     }
 
     #ui-overlay.hidden {
@@ -141,14 +145,14 @@
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
-      gap: 10px;
+      gap: 8px;
     }
 
     button {
       background: rgba(255, 255, 255, 0.14);
       border: 1px solid rgba(255, 255, 255, 0.22);
       color: #fff;
-      padding: 10px 16px;
+      padding: 10px 14px;
       border-radius: 999px;
       font-size: 13px;
       font-variant-numeric: tabular-nums;
@@ -194,10 +198,11 @@
     <div class="bottom-bar">
       <div id="caption"></div>
       <div class="controls">
-        <button id="btn-prev" type="button">← Sebelumnya</button>
-        <button id="btn-next" type="button">Acak Berikutnya →</button>
+        <button id="btn-prev" type="button">← Prev</button>
+        <button id="btn-next" type="button">Acak →</button>
         <button id="btn-auto" type="button">Auto: Off (5s)</button>
-        <button id="btn-reset-zoom" type="button" style="display: none;">Reset Zoom</button>
+        <button id="btn-zoom-in" type="button">Zoom +</button>
+        <button id="btn-reset-zoom" type="button" style="display: none;">Reset</button>
       </div>
     </div>
   </div>
@@ -218,7 +223,6 @@
     let autoRafId = null;
     let autoStartTime = 0;
 
-    // Status Transform Zoom & Pan
     let scale = 1;
     let translateX = 0;
     let translateY = 0;
@@ -232,6 +236,7 @@
     const captionEl = document.getElementById('caption');
     const uiOverlay = document.getElementById('ui-overlay');
     const btnAuto = document.getElementById('btn-auto');
+    const btnZoomIn = document.getElementById('btn-zoom-in');
     const btnResetZoom = document.getElementById('btn-reset-zoom');
     const progressTrack = document.getElementById('progress-track');
     const progressFill = document.getElementById('progress-fill');
@@ -279,13 +284,22 @@
       zoomBadge.classList.toggle('visible', isZoomed);
       btnResetZoom.style.display = isZoomed ? 'inline-block' : 'none';
 
-      // Jeda timer otomatis selama gambar sedang di-zoom
       if (isAutoEnabled) {
         if (isZoomed) {
           stopAutoProgress(false);
         } else if (autoRafId === null) {
           startAutoProgress();
         }
+      }
+    }
+
+    function zoomStep() {
+      const next = scale >= 3 ? 1 : Math.min(MAX_SCALE, +(scale + 0.8).toFixed(1));
+      if (next <= 1.02) {
+        resetZoom(true);
+      } else {
+        scale = next;
+        applyTransform(true);
       }
     }
 
@@ -487,37 +501,49 @@
     let initialPinchDist = 0, initialPinchScale = 1;
     let lastTapTime = 0;
     let movedDistance = 0;
+    let didPinchInGesture = false;
 
     function getTouchDistance(t1, t2) {
-      const dx = t1.clientX - t2.clientX;
-      const dy = t1.clientY - t2.clientY;
-      return Math.hypot(dx, dy);
+      return Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
     }
 
     viewer.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 2) {
+      if (e.touches.length >= 2) {
+        e.preventDefault();
         touchMode = 'pinch';
+        didPinchInGesture = true;
         initialPinchDist = getTouchDistance(e.touches[0], e.touches[1]);
         initialPinchScale = scale;
-        movedDistance = 20;
+        movedDistance = 30;
       } else if (e.touches.length === 1) {
         const t = e.touches[0];
         startX = lastX = t.clientX;
         startY = lastY = t.clientY;
         movedDistance = 0;
+        didPinchInGesture = false;
         touchMode = scale > 1.02 ? 'pan' : 'swipe';
       }
-    }, { passive: true });
+    }, { passive: false });
 
     viewer.addEventListener('touchmove', (e) => {
-      if (touchMode === 'pinch' && e.touches.length === 2) {
+      if (e.touches.length >= 2) {
+        e.preventDefault();
+        if (touchMode !== 'pinch') {
+          touchMode = 'pinch';
+          didPinchInGesture = true;
+          initialPinchDist = getTouchDistance(e.touches[0], e.touches[1]);
+          initialPinchScale = scale;
+        }
         const dist = getTouchDistance(e.touches[0], e.touches[1]);
         if (initialPinchDist > 0) {
           const nextScale = initialPinchScale * (dist / initialPinchDist);
           scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
           applyTransform(false);
         }
-      } else if (e.touches.length === 1) {
+        return;
+      }
+
+      if (e.touches.length === 1 && !didPinchInGesture) {
         const t = e.touches[0];
         const dx = t.clientX - lastX;
         const dy = t.clientY - lastY;
@@ -526,6 +552,7 @@
         lastY = t.clientY;
 
         if (touchMode === 'pan' && scale > 1.02) {
+          e.preventDefault();
           translateX += dx;
           translateY += dy;
           applyTransform(false);
@@ -538,67 +565,65 @@
           }
         }
       }
-    }, { passive: true });
+    }, { passive: false });
 
     viewer.addEventListener('touchend', (e) => {
-      if (touchMode === 'pinch') {
-        if (scale <= 1.05) {
-          resetZoom(true);
-        }
-        if (e.touches.length === 1) {
-          lastX = e.touches[0].clientX;
-          lastY = e.touches[0].clientY;
-          touchMode = scale > 1.02 ? 'pan' : 'swipe';
-        } else {
-          touchMode = 'none';
-        }
-        return;
-      }
-
-      if (touchMode === 'swipe' && e.touches.length === 0) {
-        const deltaX = lastX - startX;
-        const threshold = 45;
-        if (deltaX < -threshold) {
-          goNext();
-        } else if (deltaX > threshold) {
-          goPrev();
-        } else {
-          imgEl.style.transition = 'transform 0.2s ease';
-          imgEl.style.transform = 'translate(0px, 0px) scale(1)';
-        }
-      }
-
-      // Deteksi tap tunggal & double-tap
-      if (e.touches.length === 0 && movedDistance < 12) {
-        const now = Date.now();
-        if (now - lastTapTime < 280) {
-          // Double tap: toggle zoom 2.2x <-> 1x
-          if (scale > 1.05) {
-            resetZoom(true);
-          } else {
-            scale = 2.2;
-            applyTransform(true);
-          }
-          lastTapTime = 0;
-        } else {
-          lastTapTime = now;
-          setTimeout(() => {
-            if (lastTapTime !== 0 && Date.now() - lastTapTime >= 270) {
-              uiOverlay.classList.toggle('hidden');
-              lastTapTime = 0;
-            }
-          }, 280);
-        }
-      }
-
       if (e.touches.length === 0) {
+        if (didPinchInGesture) {
+          if (scale <= 1.06) {
+            resetZoom(true);
+          }
+          didPinchInGesture = false;
+          touchMode = 'none';
+          return;
+        }
+
+        if (touchMode === 'swipe') {
+          const deltaX = lastX - startX;
+          const threshold = 45;
+          if (deltaX < -threshold) {
+            goNext();
+          } else if (deltaX > threshold) {
+            goPrev();
+          } else {
+            imgEl.style.transition = 'transform 0.2s ease';
+            imgEl.style.transform = 'translate(0px, 0px) scale(1)';
+          }
+        }
+
+        if (movedDistance < 12) {
+          const now = Date.now();
+          if (now - lastTapTime < 280) {
+            if (scale > 1.05) {
+              resetZoom(true);
+            } else {
+              scale = 2.2;
+              applyTransform(true);
+            }
+            lastTapTime = 0;
+          } else {
+            lastTapTime = now;
+            setTimeout(() => {
+              if (lastTapTime !== 0 && Date.now() - lastTapTime >= 270) {
+                uiOverlay.classList.toggle('hidden');
+                lastTapTime = 0;
+              }
+            }, 280);
+          }
+        }
+
         touchMode = 'none';
+      } else if (e.touches.length === 1) {
+        lastX = e.touches[0].clientX;
+        lastY = e.touches[0].clientY;
+        touchMode = scale > 1.02 ? 'pan' : 'none';
       }
-    });
+    }, { passive: false });
 
     document.getElementById('btn-next').addEventListener('click', (e) => { e.stopPropagation(); goNext(); });
     document.getElementById('btn-prev').addEventListener('click', (e) => { e.stopPropagation(); goPrev(); });
     btnAuto.addEventListener('click', (e) => { e.stopPropagation(); toggleAutoMode(); });
+    btnZoomIn.addEventListener('click', (e) => { e.stopPropagation(); zoomStep(); });
     btnResetZoom.addEventListener('click', (e) => { e.stopPropagation(); resetZoom(true); });
 
     window.addEventListener('keydown', (e) => {
@@ -652,10 +677,3 @@
         goNext();
       } catch (err) {
         statusEl.textContent = 'Gagal mengambil data dari Google Sheets.';
-      }
-    }
-
-    init();
-  </script>
-</body>
-</html>
