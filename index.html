@@ -54,6 +54,7 @@
       position: relative;
       width: 100%;
       height: 100%;
+      height: 100dvh;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -84,6 +85,7 @@
     }
 
     #ui-overlay.hidden {
+      visibility: hidden;
       opacity: 0;
     }
 
@@ -125,7 +127,7 @@
       flex-direction: column;
       align-items: center;
       gap: 10px;
-      pointer-events: auto;
+      pointer-events: none;
     }
 
     #caption {
@@ -149,6 +151,8 @@
     }
 
     button {
+      pointer-events: auto;
+      touch-action: manipulation;
       background: rgba(255, 255, 255, 0.14);
       border: 1px solid rgba(255, 255, 255, 0.22);
       color: #fff;
@@ -221,6 +225,9 @@
     let historyStack = [];
     let historyIndex = -1;
     let nextBuffer = null;
+    let loading = false;
+    let gestureActive = false;
+    let imageReady = false;
 
     let isAutoEnabled = false;
     let autoRafId = null;
@@ -275,8 +282,8 @@
         translateY = 0;
         return;
       }
-      const maxPanX = ((scale - 1) * viewer.clientWidth) / 2;
-      const maxPanY = ((scale - 1) * viewer.clientHeight) / 2;
+      const maxPanX = Math.max(0, (scale * imgEl.offsetWidth - viewer.clientWidth) / 2);
+      const maxPanY = Math.max(0, (scale * imgEl.offsetHeight - viewer.clientHeight) / 2);
       translateX = Math.max(-maxPanX, Math.min(maxPanX, translateX));
       translateY = Math.max(-maxPanY, Math.min(maxPanY, translateY));
     }
@@ -294,8 +301,9 @@
       btnResetZoom.style.display = isZoomed ? 'inline-block' : 'none';
 
       if (isAutoEnabled) {
-        if (isZoomed) {
-          stopAutoProgress(false);
+        if (isZoomed || gestureActive) {
+          stopAutoProgress(true);
+          btnAuto.textContent = "Auto: Jeda";
         } else if (autoRafId === null) {
           startAutoProgress();
         }
@@ -373,7 +381,7 @@
 
     function startAutoProgress() {
       stopAutoProgress(false);
-      if (!isAutoEnabled || allItems.length === 0 || scale > 1.02) {
+      if (!isAutoEnabled || loading || gestureActive || allItems.length === 0 || scale > 1.02 || document.hidden) {
         if (!isAutoEnabled) {
           progressTrack.classList.remove('visible');
           countdownBadge.classList.remove('visible');
@@ -386,7 +394,7 @@
       autoStartTime = performance.now();
 
       function tick(now) {
-        if (!isAutoEnabled || scale > 1.02) {
+        if (!isAutoEnabled || loading || gestureActive || scale > 1.02 || document.hidden) {
           autoRafId = null;
           return;
         }
@@ -413,6 +421,7 @@
       btnAuto.classList.toggle('active', isAutoEnabled);
 
       if (isAutoEnabled) {
+        btnAuto.textContent = "Auto: Jeda";
         startAutoProgress();
       } else {
         stopAutoProgress(true);
@@ -423,6 +432,11 @@
     function renderSlide(itemIdx, direction = 'none') {
       const item = allItems[itemIdx];
       if (!item) return;
+      imageReady = false;
+      setStatus("Memuat gambar...");
+      imgEl.style.display = "none";
+      imgEl.style.transform = "none";
+      imgEl.style.opacity = "1";
 
       scale = 1;
       translateX = 0;
@@ -442,6 +456,7 @@
 
       imgEl.onload = () => {
         statusEl.style.display = 'none';
+        imageReady = true;
         imgEl.style.display = 'block';
         requestAnimationFrame(() => {
           imgEl.style.transition = 'transform 0.25s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease';
@@ -465,7 +480,7 @@
     }
 
     function goNext() {
-      if (allItems.length === 0) return;
+      if (loading || allItems.length === 0) return;
       stopAutoProgress(false);
       progressFill.style.width = '0%';
 
@@ -475,7 +490,7 @@
         return;
       }
 
-      const currentIdx = historyStack[historyIndex] ?? -1;
+      const currentIdx = historyIndex >= 0 ? historyStack[historyIndex] : -1;
       const chosenIdx = (nextBuffer !== null && nextBuffer !== currentIdx)
         ? nextBuffer
         : drawFromDeck(currentIdx);
@@ -488,7 +503,7 @@
     }
 
     function goPrev() {
-      if (allItems.length === 0) return;
+      if (loading || allItems.length === 0) return;
       stopAutoProgress(false);
       progressFill.style.width = '0%';
 
@@ -496,137 +511,92 @@
         historyIndex--;
         renderSlide(historyStack[historyIndex], 'prev');
       } else {
-        const currentIdx = historyStack[0] ?? -1;
-        const chosenIdx = drawFromDeck(currentIdx);
+        const currentIdx = historyStack.length ? historyStack[0] : -1;
+        const chosenIdx = nextBuffer !== null ? nextBuffer : drawFromDeck(currentIdx);
+        nextBuffer = null;
         historyStack.unshift(chosenIdx);
         renderSlide(chosenIdx, 'prev');
       }
     }
 
-    // Gesture Pinch-to-Zoom, Pan, Swipe & Double-Tap
-    let touchMode = 'none';
-    let startX = 0, startY = 0, lastX = 0, lastY = 0;
-    let initialPinchDist = 0, initialPinchScale = 1;
-    let lastTapTime = 0;
-    let movedDistance = 0;
-    let didPinchInGesture = false;
-
-    function getTouchDistance(t1, t2) {
-      return Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+    // Gesture layar sentuh: pinch mengikuti titik tengah kedua jari.
+    let mode = 'none', pinched = false, x0 = 0, y0 = 0, lastX = 0, lastY = 0;
+    let baseDist = 1, baseScale = 1, anchorX = 0, anchorY = 0;
+    let tapTimer = null, tapX = 0, tapY = 0, moved = false;
+    function midpoint(t) {
+      const r = viewer.getBoundingClientRect();
+      return { x: (t[0].clientX + t[1].clientX)/2-r.left-r.width/2,
+               y: (t[0].clientY + t[1].clientY)/2-r.top-r.height/2 };
     }
-
-    viewer.addEventListener('touchstart', (e) => {
+    function distance(t) { return Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY); }
+    function beginPinch(t) {
+      mode = 'pinch'; pinched = true; moved = true;
+      clearTimeout(tapTimer); tapTimer = null;
+      baseDist = Math.max(1,distance(t)); baseScale = scale;
+      const m = midpoint(t);
+      anchorX = (m.x-translateX)/scale; anchorY = (m.y-translateY)/scale;
+      applyTransform(false);
+    }
+    viewer.addEventListener('touchstart', function(e) {
+      if (!imageReady || loading) return;
+      e.preventDefault(); gestureActive = true;
+      stopAutoProgress(true);
+      if (isAutoEnabled) btnAuto.textContent = 'Auto: Jeda';
+      if (e.touches.length >= 2) { beginPinch(e.touches); return; }
+      const t = e.touches[0];
+      x0 = lastX = t.clientX; y0 = lastY = t.clientY;
+      moved = false; pinched = false; mode = scale > 1.02 ? 'pan' : 'swipe';
+    }, {passive:false});
+    viewer.addEventListener('touchmove', function(e) {
+      if (!gestureActive) return;
+      e.preventDefault();
       if (e.touches.length >= 2) {
-        e.preventDefault();
-        touchMode = 'pinch';
-        didPinchInGesture = true;
-        initialPinchDist = getTouchDistance(e.touches[0], e.touches[1]);
-        initialPinchScale = scale;
-        movedDistance = 30;
-      } else if (e.touches.length === 1) {
-        const t = e.touches[0];
-        startX = lastX = t.clientX;
-        startY = lastY = t.clientY;
-        movedDistance = 0;
-        didPinchInGesture = false;
-        touchMode = scale > 1.02 ? 'pan' : 'swipe';
+        if (mode !== 'pinch') beginPinch(e.touches);
+        const m = midpoint(e.touches);
+        scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, baseScale*distance(e.touches)/baseDist));
+        translateX = m.x-anchorX*scale; translateY = m.y-anchorY*scale;
+        applyTransform(false); return;
       }
-    }, { passive: false });
-
-    viewer.addEventListener('touchmove', (e) => {
-      if (e.touches.length >= 2) {
-        e.preventDefault();
-        if (touchMode !== 'pinch') {
-          touchMode = 'pinch';
-          didPinchInGesture = true;
-          initialPinchDist = getTouchDistance(e.touches[0], e.touches[1]);
-          initialPinchScale = scale;
-        }
-        const dist = getTouchDistance(e.touches[0], e.touches[1]);
-        if (initialPinchDist > 0) {
-          const nextScale = initialPinchScale * (dist / initialPinchDist);
-          scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
-          applyTransform(false);
-        }
-        return;
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0], dx = t.clientX-lastX, dy = t.clientY-lastY;
+      lastX = t.clientX; lastY = t.clientY;
+      if (Math.hypot(lastX-x0,lastY-y0)>12) moved = true;
+      if (mode === 'pan') { translateX += dx; translateY += dy; applyTransform(false); }
+      else if (mode === 'swipe' && Math.abs(lastX-x0)>Math.abs(lastY-y0)) {
+        imgEl.style.transition = 'none';
+        imgEl.style.transform = 'translateX('+((lastX-x0)*0.45)+'px)';
       }
-
-      if (e.touches.length === 1 && !didPinchInGesture) {
-        const t = e.touches[0];
-        const dx = t.clientX - lastX;
-        const dy = t.clientY - lastY;
-        movedDistance += Math.hypot(dx, dy);
-        lastX = t.clientX;
-        lastY = t.clientY;
-
-        if (touchMode === 'pan' && scale > 1.02) {
-          e.preventDefault();
-          translateX += dx;
-          translateY += dy;
-          applyTransform(false);
-        } else if (touchMode === 'swipe') {
-          const totalDx = t.clientX - startX;
-          const totalDy = t.clientY - startY;
-          if (Math.abs(totalDx) > Math.abs(totalDy)) {
-            imgEl.style.transition = 'none';
-            imgEl.style.transform = `translateX(${totalDx * 0.45}px) scale(1)`;
-          }
+    }, {passive:false});
+    viewer.addEventListener('touchend', function(e) {
+      if (!gestureActive) return;
+      if (e.touches.length >= 2) { beginPinch(e.touches); return; }
+      if (e.touches.length === 1) {
+        lastX=e.touches[0].clientX; lastY=e.touches[0].clientY;
+        mode='pan'; return;
+      }
+      gestureActive=false;
+      if (!pinched && mode==='swipe' && Math.abs(lastX-x0)>45 && Math.abs(lastX-x0)>Math.abs(lastY-y0)) {
+        clearTimeout(tapTimer); tapTimer=null; mode='none';
+        if (lastX<x0) goNext(); else goPrev(); return;
+      }
+      if (scale<=1.06) resetZoom(true); else applyTransform(true);
+      if (!pinched && !moved) {
+        if (tapTimer !== null && Math.hypot(x0-tapX,y0-tapY)<40) {
+          clearTimeout(tapTimer); tapTimer=null;
+          if (scale>1.05) resetZoom(true);
+          else { scale=2.2; applyTransform(true); }
+        } else {
+          clearTimeout(tapTimer); tapX=x0; tapY=y0;
+          tapTimer=setTimeout(function(){uiOverlay.classList.toggle('hidden');tapTimer=null;},280);
         }
       }
-    }, { passive: false });
-
-    viewer.addEventListener('touchend', (e) => {
-      if (e.touches.length === 0) {
-        if (didPinchInGesture) {
-          if (scale <= 1.06) {
-            resetZoom(true);
-          }
-          didPinchInGesture = false;
-          touchMode = 'none';
-          return;
-        }
-
-        if (touchMode === 'swipe') {
-          const deltaX = lastX - startX;
-          const threshold = 45;
-          if (deltaX < -threshold) {
-            goNext();
-          } else if (deltaX > threshold) {
-            goPrev();
-          } else {
-            imgEl.style.transition = 'transform 0.2s ease';
-            imgEl.style.transform = 'translate(0px, 0px) scale(1)';
-          }
-        }
-
-        if (movedDistance < 12) {
-          const now = Date.now();
-          if (now - lastTapTime < 280) {
-            if (scale > 1.05) {
-              resetZoom(true);
-            } else {
-              scale = 2.2;
-              applyTransform(true);
-            }
-            lastTapTime = 0;
-          } else {
-            lastTapTime = now;
-            setTimeout(() => {
-              if (lastTapTime !== 0 && Date.now() - lastTapTime >= 270) {
-                uiOverlay.classList.toggle('hidden');
-                lastTapTime = 0;
-              }
-            }, 280);
-          }
-        }
-
-        touchMode = 'none';
-      } else if (e.touches.length === 1) {
-        lastX = e.touches[0].clientX;
-        lastY = e.touches[0].clientY;
-        touchMode = scale > 1.02 ? 'pan' : 'none';
-      }
-    }, { passive: false });
+      mode='none';
+    }, {passive:false});
+    viewer.addEventListener('touchcancel', function(){
+      gestureActive=false; mode='none'; pinched=false;
+      clearTimeout(tapTimer); tapTimer=null; applyTransform(false);
+    });
+    window.addEventListener('resize', function(){ if(imageReady) applyTransform(false); });
 
     document.getElementById('btn-next').addEventListener('click', (e) => { e.stopPropagation(); goNext(); });
     document.getElementById('btn-prev').addEventListener('click', (e) => { e.stopPropagation(); goPrev(); });
@@ -651,20 +621,34 @@
     });
 
     async function init(forceFresh = false) {
-      stopAutoProgress(false);
+      if (loading) return;
+      loading = true;
+      stopAutoProgress(true);
+      imageReady = false;
+      imgEl.style.display = 'none';
+      counterEl.textContent = 'Memuat...';
+      allItems = [];
       setStatus('Memuat daftar gambar...');
+      let timeoutId;
 
       try {
         const sep = CSV_URL.includes('?') ? '&' : '?';
         const targetUrl = forceFresh ? `${CSV_URL}${sep}_t=${Date.now()}` : CSV_URL;
-        const res = await fetch(targetUrl, { cache: forceFresh ? 'no-store' : 'default' });
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const request = fetch(targetUrl, { cache: 'no-store', ...(controller ? {signal: controller.signal} : {}) })
+          .then(async response => ({response, text: await response.text()}));
+        const timeout = new Promise((resolve, reject) => {
+          timeoutId = setTimeout(() => { reject(new Error('Waktu tunggu 15 detik habis. Periksa internet, lalu tekan Reload.')); if (controller) controller.abort(); }, 15000);
+        });
+        const result = await Promise.race([request, timeout]);
+        const res = result.response;
 
         if (!res.ok) {
           setStatus(`Gagal memuat sheet (HTTP ${res.status}).`);
           return;
         }
 
-        const csvText = await res.text();
+        const csvText = result.text;
         const rows = parseCSV(csvText);
 
         if (rows.length < 2) {
@@ -699,9 +683,14 @@
         nextBuffer = null;
 
         buildShuffledDeck(-1);
+        loading = false;
         goNext();
       } catch (err) {
         setStatus(`Gagal mengambil data dari Google Sheets: ${err && err.message ? err.message : 'Error jaringan'}`);
+      } finally {
+        clearTimeout(timeoutId);
+        loading = false;
+        if (!allItems.length) counterEl.textContent = '0 gambar';
       }
     }
 
